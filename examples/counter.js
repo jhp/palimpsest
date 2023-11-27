@@ -3,7 +3,7 @@ let { H, A, S, T, E, run, Var } = require("imperative");
 
 const click = input("counter:click");
 
-const counter = click.reduce(async (k, n) => n + k, 0);
+const counter = click.fold(async (k, n) => n + k, 0);
 
 const currentCount = output(async () => counter());
 

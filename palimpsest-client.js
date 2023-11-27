@@ -1,6 +1,6 @@
 let { Mailbox } = require("./util");
 
-let outputN = 0;
+let outputs = {};
 
 const views = [];
 
@@ -52,20 +52,22 @@ module.exports = {
             const result = await fetch(`/@input/${name}`, {method: 'POST', body: JSON.stringify(payload)});
             return Number(await result.text());
         }
-        fn.reduce = () => {};
+        fn.fold = () => {};
         return fn;
     },
     output: function() {
-        let n = outputN++;
+        let key = window.__mod;
+        let n = outputs[key] || 0;
+        outputs[key] = n+1;
         return async function*() {
-            if(!outputSubs.has(n)) {
-                outputSubs.set(n, 1);
-                fetch(`/@output/${tabId}/${n}`);
+            if(!outputSubs.has(`${encodeURIComponent(key)}/${n}`)) {
+                outputSubs.set(`${encodeURIComponent(key)}/${n}`, 1);
+                fetch(`/@output/${tabId}/${encodeURIComponent(key)}/${n}`);
             } else {
-                outputSubs.set(n, outputSubs.get(n) + 1);
+                outputSubs.set(n, outputSubs.get(`${encodeURIComponent(key)}/${n}`) + 1);
             }
             while(true) {
-                const next = await listeners.receive(`output:${n}`);
+                const next = await listeners.receive(`output:${key}/${n}`);
                 yield next;
             }
         };

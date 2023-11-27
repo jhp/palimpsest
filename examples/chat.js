@@ -5,9 +5,9 @@ const setName = input("chat:username");
 
 const sendMessage = input("chat:message");
 
-const usernames = setName.reduce(async (name, names, session) => ({ ...names, [session]: name}), {});
+const usernames = setName.fold(async (name, names, session) => ({ ...names, [session]: name}), {});
 
-const messages = sendMessage.reduce(async (msg, msgs, session) => [[session, msg], ...msgs].slice(0, 50), []);
+const messages = sendMessage.fold(async (msg, msgs, session) => [[session, msg], ...msgs].slice(0, 50), []);
 
 const chats = output(async (userSession) => {
     let lookup = usernames();
