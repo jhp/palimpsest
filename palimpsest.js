@@ -82,8 +82,6 @@ const inputs = { };
 
 const inputEvents = Mailbox();
 
-const foldEvents = Mailbox();
-
 const folds = [ ];
 
 const outputs = {};
@@ -98,44 +96,20 @@ const eventStreams = Mailbox();
 
 let initialized = (async () => {
     await new Promise(resolve => setTimeout(resolve, 16));
-    for(let fold of folds) {
-        let foldKeys = await Promise.all(fold.keys);
-        let key = require('crypto').createHash('sha256').update(JSON.stringify(foldKeys)).digest('hex');
-        let lastValue = [0, fold.seed];
-        try {
-            lastValue = JSON.parse(await db.get(`fold:${key}`));
-        } catch(e) {
-            if(!e.notFound) {
-                throw e;
-            }
+    (async () => {
+        while(true) {
+            let [name, id, session, val] = await inputEvents.receive('');
+            await Promise.all(
+                inputs[name].folds.map(fn => 
+                    fn(id, session, val).catch(e => console.error(e))
+                )
+            );
         }
-        fold.id = lastValue[0];
-        fold.value = lastValue[1];
-        (async () => {
-            while(true) {
-                let [name, id, session, val] = await foldEvents.receive(key);
-                if(id > fold.id) {
-                    let nextValue = await fold.inputs[ name ]( val, fold.value, session, id );
-                    fold.id = id;
-                    fold.value = nextValue;
-                    await db.put(`fold:${key}`, JSON.stringify([id, nextValue]));
-                    sockets.forEach(fn => fn());
-                }
-            }
-        })();
-        for(let name of Object.keys(fold.inputs)) {
-            (async () => {
-                while(true) {
-                    let [id, session, val] = await inputEvents.receive(name);
-                    foldEvents.send(key, [name, id, session, val]);
-                }
-            })();
-        }
-    }
+    })();
     for await (const [key, value] of db.iterator({gt: `input:`, lt: `input;`})) {
         let id = parseInt(`${key}`.split(":")[1], 16);
         let [name, session, val] = JSON.parse(value);
-        inputEvents.send(name, [id, session, val]);
+        inputEvents.send('', [name, id, session, val]);
     }
 })();
 
@@ -169,7 +143,7 @@ async function handler(req, res, next) {
                 val = await inputs[name].filter(val);
             }
             await db.put(`input:${id.toString(16).padStart(16, '0')}`, JSON.stringify([name, session, val]));
-            inputEvents.send(name, [id, session, val]);
+            inputEvents.send('', [name, id, session, val]);
             res.writeHead(200, {'Content-Type': 'text/plain'});
             res.end(`${id}`);
         } else {
@@ -205,10 +179,16 @@ async function handler(req, res, next) {
     } else if(path[0] === '@load') {
         const tabId = path[1];
         const key = path[2];
-        const val = await load(key);
-        eventStreams.send(tabId, [key, val]);
-        res.writeHead(200, {'Content-Type': 'text/plain'});
-        res.end();
+        try {
+            const val = await load(key);
+            eventStreams.send(tabId, [key, val]);
+            res.writeHead(200, {'Content-Type': 'text/plain'});
+            res.end();
+        } catch(e) {
+            console.error(e);
+            res.writeHead(500, {'Content-Type': 'text/plain'});
+            res.end();
+        }
     } else if(path[0] === '@events') {
         const tabId = path[1];
         res.writeHead(200, {'Content-Type': 'text/event-stream'});
@@ -250,7 +230,12 @@ async function save(data) {
 }
 
 async function load(key) {
-    return JSON.parse( await db.get(`hash:${key}`) );
+    try {
+        return JSON.parse( await db.get(`hash:${key}`) );
+    } catch(e) {
+        console.error(e);
+        return null;
+    }
 }
 
 module.exports = {
@@ -258,6 +243,7 @@ module.exports = {
     load,
     input: (name, opts={}) => {
         inputs[ name ] = opts;
+        inputs[ name ].folds = [];
         return {
             fold: (fn, seed) => {
                 let [fname, line, col] = getCallingFilename(__filename);
@@ -267,10 +253,10 @@ module.exports = {
                     return require('crypto').createHash('sha256').update(`fold:${line}:${col}:${bundle}`).digest('hex');
                 })();
 
+
                 let fold;
                 if(folds.includes(seed)) {
                     fold = seed;
-                    fold.inputs[name] = fn;
                     fold.keys.push( foldKey );
                 } else {
                     fold = function() {
@@ -279,9 +265,33 @@ module.exports = {
                     folds.push(fold);
                     fold.value = seed;
                     fold.seed = seed;
-                    fold.inputs = { [name]: fn };
                     fold.keys = [ foldKey ];
+                    fold.id = (async () => {
+                        await new Promise(resolve => setTimeout(resolve, 16));
+                        let foldKeys = await Promise.all(fold.keys);
+                        let key = require('crypto').createHash('sha256').update(JSON.stringify(foldKeys)).digest('hex');
+                        fold.key = key;
+                        let lastValue = [0, fold.seed];
+                        try {
+                            lastValue = JSON.parse(await db.get(`fold:${key}`));
+                        } catch(e) {
+                            if(!e.notFound) {
+                                throw e;
+                            }
+                        }
+                        fold.value = lastValue[1];
+                        return lastValue[0];
+                    })();
                 }
+                inputs[ name ].folds.push(async (id, session, val) => {
+                    if(id > await fold.id) {
+                        fold.id = Promise.resolve(id);
+                        let nextValue = await fn( val, fold.value, session, id );
+                        fold.value = nextValue;
+                        await db.put(`fold:${fold.key}`, JSON.stringify([id, nextValue]));
+                        sockets.forEach(fn => fn());
+                    }
+                });
                 return fold;
             }
         }
