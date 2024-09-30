@@ -72,6 +72,7 @@ module.exports = {
             }
         };
     },
+    effect: () => {},
     setRoot: () => {},
     view: (prefix, fn) => {
         views.push({prefix, fn});

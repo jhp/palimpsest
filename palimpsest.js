@@ -88,7 +88,7 @@ const outputs = {};
 
 const views = [];
 
-const sockets = new Set();
+const effects = new Set();
 
 const closedStreams = Mailbox();
 
@@ -96,21 +96,26 @@ const eventStreams = Mailbox();
 
 let initialized = (async () => {
     await new Promise(resolve => setTimeout(resolve, 16));
-    (async () => {
-        while(true) {
-            let [name, id, session, val] = await inputEvents.receive('');
+    async function processEvent(name, id, session, val) {
+        if(inputs[name]) {
             await Promise.all(
                 inputs[name].folds.map(fn => 
                     fn(id, session, val).catch(e => console.error(e))
                 )
             );
         }
-    })();
+    }
     for await (const [key, value] of db.iterator({gt: `input:`, lt: `input;`})) {
         let id = parseInt(`${key}`.split(":")[1], 16);
         let [name, session, val] = JSON.parse(value);
-        inputEvents.send('', [name, id, session, val]);
+        await processEvent(name, id, session, val);
     }
+    (async () => {
+        while(true) {
+            let [name, id, session, val] = await inputEvents.receive('');
+            await processEvent(name, id, session, val);
+        }
+    })();
 })();
 
 function getCallingFilename(fname) {
@@ -129,7 +134,12 @@ function getCallingFilename(fname) {
 async function handler(req, res, next) {
     await initialized;
     const session = getSession(req, res);
-    const path = req.url.split('/').filter(Boolean).map(str => decodeURIComponent(str));
+    let path = [];
+    try {
+        path = req.url.split('/').filter(Boolean).map(str => decodeURIComponent(str));
+    } catch(e) {
+        console.error(e);
+    }
     if(path[0] === '@input') {
         const name = path[1];
         if(inputs[ name ]) {
@@ -163,9 +173,9 @@ async function handler(req, res, next) {
         let fn = () => {
             output(session).then(oval => eventStreams.send(tabId, [`output:${key}/${n}`, oval]));
         }
-        sockets.add(fn);
+        effects.add(fn);
         fn();
-        closedStreams.receive(tabId).then(() => sockets.delete(fn));
+        closedStreams.receive(tabId).then(() => effects.delete(fn));
         res.writeHead(200, {'Content-Type': 'text/plain'});
         res.end('');
     } else if(path[0] === '@save') {
@@ -238,12 +248,23 @@ async function load(key) {
     }
 }
 
+const rootSession = ''.padStart(32, '0');
+
 module.exports = {
     save,
     load,
+    rootSession,
     input: (name, opts={}) => {
         inputs[ name ] = opts;
         inputs[ name ].folds = [];
+        const ret = async function(val) {
+            const id = await nextId();
+            if(inputs[ name ].filter) {
+                val = await inputs[name].filter(val);
+            }
+            await db.put(`input:${id.toString(16).padStart(16, '0')}`, JSON.stringify([name, rootSession, val]));
+            inputEvents.send('', [name, id, rootSession, val]);
+        };
         return {
             fold: (fn, seed) => {
                 let [fname, line, col] = getCallingFilename(__filename);
@@ -289,7 +310,7 @@ module.exports = {
                         let nextValue = await fn( val, fold.value, session, id );
                         fold.value = nextValue;
                         await db.put(`fold:${fold.key}`, JSON.stringify([id, nextValue]));
-                        sockets.forEach(fn => fn());
+                        effects.forEach(fn => fn());
                     }
                 });
                 return fold;
@@ -301,6 +322,10 @@ module.exports = {
         outputs[ fname ] = outputs[ fname ] || [];
         outputs[ fname ].push(fn);
         return [fname, outputs[fname].length-1];
+    },
+    effect: async (fn) => {
+        await initialized;
+        effects.add(fn);
     },
     view: (prefix, fn) => { 
         let root = getCallingFilename(__filename)[0];
